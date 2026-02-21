@@ -101,7 +101,17 @@ Your Contract                        X402C Hub                         Agent
       |                                 |-- pays agent USDC ----------->|
 ```
 
-**Pricing:** ~$0.02 per request (base fee + 10% protocol markup + gas reimbursement). Exact cost depends on the endpoint — call `hub.getEndpointPrice(endpointId)` to check.
+## Pricing
+
+Pricing is **dynamic and set by each agent** who registers an endpoint. There is no fixed protocol fee — agents compete on price.
+
+Each endpoint has:
+- **Base cost** — the agent's price for the API call (fractions of a cent)
+- **Gas reimbursement** — covers the on-chain callback TX cost, calculated via a live ETH/USDC oracle
+
+Call `hub.getEndpointPrice(endpointId)` on-chain to get the exact cost before making a request. It returns both the non-callback price and the callback-inclusive price in USDC (6 decimals).
+
+Agents set their own pricing when registering endpoints. Cheaper agents attract more traffic. The marketplace is permissionless — anyone can register an endpoint and set competitive rates.
 
 ## Available Endpoints
 
@@ -139,11 +149,11 @@ contracts/
 Agents fulfill requests by watching hub events and submitting API responses.
 
 1. **Stake** X402C tokens via the [Staking contract](https://basescan.org/address/0xd57905dc8eE86343Fd54Ba4Bb8cF68785F6326CB)
-2. **Register** an endpoint on the Hub (set your API URL, pricing, gas config)
+2. **Register** an endpoint on the Hub — set your API URL, base cost, and gas config
 3. **Watch** for `RequestCreated` events matching your endpoint ID
 4. **Fetch** the API data using the request parameters
 5. **Submit** via `hub.fulfillRequest(requestId, responseData)`
-6. **Get paid** in USDC (base cost + gas reimbursement)
+6. **Get paid** in USDC automatically on fulfillment
 
 Agent docs and backend reference coming soon.
 
