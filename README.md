@@ -101,6 +101,188 @@ Your Contract                        X402C Hub                         Agent
       |                                 |-- pays agent USDC ----------->|
 ```
 
+## Security & Trust Model
+
+X402C is designed so that **no single party can steal funds, manipulate data, or grief other participants**. Every external call is isolated, every payment is ordered defensively, and every role has bounded authority.
+
+### Architecture Security Summary
+
+```
+Consumer Contract          X402C Hub (nonReentrant)              Agent Wallet
+      |                          |                                    |
+      |-- request + USDC ------->|  balance deducted BEFORE           |
+      |                          |  request is created                |
+      |                          |                                    |
+      |                          |-- RequestCreated event ----------->|
+      |                          |                                    |
+      |                          |<-- fulfillRequest(data) -----------|
+      |                          |                                    |
+      |                          |  1. validate (status, size, owner) |
+      |                          |  2. mark FULFILLED (state first)   |
+      |                          |  3. pay agent USDC                 |
+      |                          |  4. try callback { gas: limit }    |
+      |                          |     catch { success = false }      |
+      |                          |                                    |
+      |<-- _onFulfilled() -------|  callback isolated — can't break   |
+      |    (gas-limited,         |  fulfillment or agent payment      |
+      |     try/catch wrapped)   |                                    |
+```
+
+### Callback Isolation
+
+The most common concern: *"Can a malicious consumer contract exploit the callback to steal from agents?"*
+
+**No.** Here's why:
+
+| Protection | How It Works |
+|-----------|--------------|
+| **Fees paid before callback** | `_distributeFees()` runs before `_executeCallback()`. Agent is paid regardless of callback outcome. |
+| **try/catch wrapping** | Callback reverts are caught silently. A failing callback sets `success = false` but does not revert the fulfillment. |
+| **Explicit gas limit** | Callback runs with `{gas: endpoint.callbackGasLimit}` — agent controls this value per endpoint. Infinite loops, storage bombs, and expensive computation are all bounded. |
+| **nonReentrant guard** | `fulfillRequest()` is protected by a reentrancy lock. Callback cannot re-enter the hub to double-fulfill, double-cancel, or manipulate state. |
+| **msg.sender = hub** | Inside the callback, `msg.sender` is the hub contract, not the agent wallet. A malicious callback cannot call `transferFrom(tx.origin, ...)` because the agent never approved the consumer contract for anything. |
+
+**Callback failure does not affect agent payment.** The hub stores `callbackSuccess = true/false` for transparency, but the request is `FULFILLED` and the agent is paid either way.
+
+### Payment Safety (Checks-Effects-Interactions)
+
+All payment flows follow the checks-effects-interactions pattern to prevent reentrancy and state manipulation:
+
+**Request creation:**
+1. Validate endpoint exists and is active
+2. Calculate cost via oracle
+3. **Deduct balance** from consumer (effect)
+4. Create request struct (effect)
+5. Emit event (no external call)
+
+**Fulfillment:**
+1. Validate request is PENDING, caller is endpoint owner, response fits size limit
+2. **Mark request FULFILLED** (effect — before any external call)
+3. Transfer USDC to agent and protocol (interaction — state already final)
+4. Execute callback in try/catch (interaction — isolated)
+
+**Cancellation:**
+1. Validate request is PENDING and timed out
+2. **Mark request CANCELLED** (effect)
+3. Refund consumer balance (effect — internal bookkeeping)
+4. Transfer canceller share (interaction)
+
+### Agent Protection
+
+Agents are the fulfillment layer — they stake tokens, watch for requests, and submit API responses. The protocol protects them from:
+
+| Attack Vector | Mitigation |
+|--------------|------------|
+| **Callback griefing** | Gas-limited + try/catch. Callback can waste at most `callbackGasLimit` gas (~$0.06 at 2M gas on Base). Agent is already paid. |
+| **Stealth approvals** in callback | `msg.sender` inside callback = hub, not agent. Agent wallet has no token approvals to the consumer. `tx.origin` attacks fail because agent never approved consumer contract. |
+| **Double fulfillment** | Hub checks `status == PENDING` before allowing fulfillment. Second call reverts. |
+| **Unprofitable requests** | Agent runs pre-flight `estimateGas()` + profitability check before submitting. Skips if gas cost exceeds reimbursement. |
+| **Gas estimation attacks** | Agent adds 20% buffer over estimate. Response size is bounded by `maxResponseBytes` (hub reverts if exceeded). |
+| **Slashing abuse** | Only authorized slashers (hub, governance timelock, dispute resolver) can slash. Slash amount capped at agent's stake. |
+
+### Consumer Protection
+
+Consumers deposit USDC and create requests. The protocol protects them from:
+
+| Attack Vector | Mitigation |
+|--------------|------------|
+| **Agent never fulfills** | Requests auto-expire after timeout. Consumer gets 90% refund on cancellation (gas reimbursement + 90% of API cost). |
+| **Agent submits garbage data** | Dispute resolution system — consumer stakes 100 X402C bond to challenge. If upheld, agent is slashed 50% and bond is returned. |
+| **Overcharging** | Pricing is transparent — `getEndpointPrice()` returns exact cost before request. Oracle-based gas pricing tracks real ETH/USDC rates. |
+| **Response too large (gas bomb)** | Hub enforces `maxResponseBytes` per endpoint. Oversized responses are rejected before callback. |
+| **Funds locked forever** | Cancel + refund path exists for timed-out requests. Owner can recover stuck tokens via emergency functions. |
+
+### Access Control
+
+The protocol uses a layered permission model — no single key can do everything:
+
+| Role | Can Do | Cannot Do |
+|------|--------|-----------|
+| **Owner** | Transfer ownership, add/remove admins, emergency recovery | Fulfill requests, access consumer funds, bypass reentrancy guards |
+| **Admin** | Register agents, set protocol config, flush fees to buyback | Directly move consumer deposits, override request outcomes |
+| **Agent** | Register endpoints, fulfill their own requests, update their pricing | Fulfill other agents' requests, access protocol fees, modify other endpoints |
+| **Consumer** | Deposit USDC, create requests, file disputes | Withdraw other consumers' funds, bypass payment requirements |
+| **Governance (Timelock)** | Execute voted proposals after 24h delay, manage staking/buyback config | Bypass timelock delay, unilaterally change contracts |
+
+### Staking & Slashing
+
+Agents stake X402C tokens as collateral for good behavior:
+
+- **Slash triggers**: Only bad data (failed sanity check) or upheld disputes. Timeouts are NOT slashable — agents just lose reputation.
+- **Slash distribution**: 50% to staker reward pool, 50% donated to V4 liquidity hook — prevents any single party from profiting off slashes.
+- **Cooldown period**: Unstaking requires a cooldown, preventing agents from front-running an incoming slash by withdrawing.
+- **Authorized slashers only**: Hub contract, governance timelock, and dispute resolver are the only addresses that can trigger slashes.
+
+### Dispute Resolution
+
+Consumers can challenge agent responses through on-chain disputes:
+
+1. Consumer stakes **100 X402C bond** and opens dispute with evidence
+2. Resolver has **3 days** to review
+3. **Upheld**: Agent slashed 50%, consumer bond returned
+4. **Rejected**: Bond split 50/50 between staker rewards and liquidity
+5. **Unresolved after 10 days**: Consumer reclaims bond automatically (grace period protection)
+
+The bond requirement prevents spam disputes, and the grace period ensures consumers can't lose their bond to resolver inaction.
+
+### Oracle & Pricing
+
+Gas reimbursement uses a Uniswap V2 price oracle (`getAmountsOut`) for real-time ETH/USDC conversion:
+
+- **Admin sets gas cost in wei** per endpoint (based on observed callback gas usage)
+- **Oracle converts wei to USDC** at current market rate
+- **Snapshot pricing**: Gas reimbursement is calculated at request creation and locked — price swings between request and fulfillment don't affect the agent or consumer
+- **Admin can swap oracle**: `setPriceOracle()` allows upgrading to V3 TWAP or Chainlink without redeploying the hub
+
+### Known Limitations & Transparency
+
+| Limitation | Status | Mitigation |
+|-----------|--------|------------|
+| **V2 oracle (no TWAP)** | Uses spot price, not time-weighted average | Snapshot pricing locks cost at request time. Oracle is swappable — V3 TWAP or Chainlink can be plugged in. |
+| **Owner emergency powers** | Owner can recover tokens, add admins | Ownership transferred to governance timelock (24h delay). All changes are public and on-chain. |
+| **Agents see request params** | Agents must read params to call APIs | Architectural requirement — agents need params to fetch data. ZK commitment proves data integrity post-response. |
+| **Callback failures are silent** | Consumer callback can fail without notification | `callbackSuccess` is stored on-chain and emitted as `CallbackExecuted` event. Consumers should monitor this. |
+| **Single-block oracle reads** | Flash loan could theoretically manipulate gas pricing | Impact is bounded — gas reimbursement is a small fraction of request cost ($0.01-$0.02). Manipulation profit is negligible. |
+
+### Best Practices for Consumer Developers
+
+```solidity
+// DO: Inherit X402CConsumerBase for callback routing + onlyHub protection
+contract MyConsumer is X402CConsumerBase { ... }
+
+// DO: Keep _onFulfilled() simple — store data, emit event, done
+function _onFulfilled(bytes32 requestId, bytes calldata data) internal override {
+    responses[requestId] = data;
+    emit Fulfilled(requestId);
+}
+
+// DO: Check cost before requesting
+(, uint256 cost) = hub.getEndpointPrice(endpointId);
+
+// DON'T: Make external calls in _onFulfilled() — callback gas is limited
+// DON'T: Assume callback always succeeds — check callbackSuccess on-chain
+// DON'T: Store massive response data — each byte costs gas in the callback
+```
+
+### Best Practices for Agent Operators
+
+1. **Set `callbackGasLimit` conservatively** — 2M gas covers most use cases. Lower = less risk per callback.
+2. **Set `maxResponseBytes` tightly** — don't allow 10KB responses if your API returns 200 bytes. Smaller = cheaper callbacks.
+3. **Run pre-flight gas estimation** — simulate fulfillment before submitting to catch reverts early.
+4. **Monitor profitability** — compare gas reimbursement to actual TX cost. Skip requests that lose money.
+5. **Stake proportionally** — your stake is your collateral. More stake = higher reputation, but more at risk if slashed.
+
+### Verified Contracts
+
+All protocol contracts are **verified and open-source** on Basescan. Every function, modifier, and state variable is publicly readable:
+
+- [X402C Hub](https://basescan.org/address/0x46048903457eA7976Aab09Ab379b52753531F08C#code) — Core request/fulfill/callback logic
+- [X402C Staking](https://basescan.org/address/0xd57905dc8eE86343Fd54Ba4Bb8cF68785F6326CB#code) — Agent stake, slash, and rewards
+- [X402C Dispute Resolver](https://basescan.org/address/0x27798a59635fb3E3F9e3373BDCAC8a78a43496bE#code) — Consumer challenge system
+- [X402C Price Oracle](https://basescan.org/address/0xdc5c2E4316f516982c9caAC4d28827245e89bf53#code) — ETH/USDC gas pricing
+- [X402C Governor](https://basescan.org/address/0x9b9CB431002685aEF9A3f5203A8FF5DB8A8c5781#code) — DAO governance
+- [X402C Token](https://basescan.org/address/0x001373f663c235a2112A14e03799813EAa7bC6F1#code) — ERC20Votes governance token
+
 ## Pricing
 
 Pricing is **dynamic and set by each agent** who registers an endpoint. There is no fixed protocol fee — agents compete on price.
