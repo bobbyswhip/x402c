@@ -24,11 +24,12 @@ interface IX402CPriceOracle {
  * @notice Subscription-based keep-alive system. Contracts register subscriptions,
  *         any agent can fulfill them on a race-condition basis (first TX wins).
  *
- * Same fee structure as the X402C Hub:
- *   markup = (baseCost * 10%) capped at $1
- *   gasReimbursement = oracle.estimateGasCostUsdc(estimatedGasCostWei)
- *   Agent gets: baseCost + gasReimbursement
- *   Protocol gets: markup (accumulated, flushable to buyback)
+ * Fee model:
+ *   Consumer sets a fee per cycle ($0.001 - $1 USDC).
+ *   10% markup on fee goes to protocol (flushable to buyback → X402C distribution).
+ *   Gas reimbursement computed via oracle from consumer's declared gas cost.
+ *   Agent gets: fee + gasReimbursement.
+ *   Protocol gets: markup (10% of fee, capped at $1).
  *
  * No agent registration required. Any address can call fulfill().
  */
@@ -49,7 +50,7 @@ contract X402CKeepAlive {
     mapping(bytes32 => Subscription) public subscriptions;
     bytes32[] public subscriptionIds;
 
-    // Protocol fee accumulator
+    // Protocol fee accumulator (markup → buyback → X402C distribution)
     uint256 public protocolFeesAccumulator;
     uint256 public totalProtocolFeesUSDC;
     uint256 public totalVolumeUSDC;
@@ -63,6 +64,8 @@ contract X402CKeepAlive {
     uint256 public constant MARKUP_BPS = 1000;          // 10%
     uint256 public constant MAX_MARKUP = 1_000_000;     // $1 cap (6 decimals)
     uint256 public constant BPS_DENOMINATOR = 10000;
+    uint256 public constant MIN_FEE = 1_000;            // $0.001 minimum (6 decimals)
+    uint256 public constant MAX_FEE = 1_000_000;        // $1.00 maximum (6 decimals)
 
     // ========== TYPES ==========
 
@@ -71,17 +74,12 @@ contract X402CKeepAlive {
         address callbackTarget;      // contract to call back
         uint256 callbackGasLimit;    // gas cap per callback
         uint256 intervalSeconds;     // min time between cycles
-        uint256 baseCostUnits;       // USDC per cycle (6 decimals)
-        uint256 estimatedGasCostWei; // for oracle gas calc
+        uint256 feePerCycle;         // USDC fee per cycle (6 decimals), goes to agent
+        uint256 estimatedGasCostWei; // consumer-declared callback gas cost in wei
         uint256 maxFulfillments;     // 0 = unlimited
         uint256 fulfillmentCount;    // how many times fulfilled
         uint256 lastFulfilled;       // timestamp of last fulfill
         bool active;                 // can be fulfilled
-    }
-
-    struct CallbackResult {
-        bool executed;
-        bool success;
     }
 
     // ========== EVENTS ==========
@@ -91,7 +89,7 @@ contract X402CKeepAlive {
         address indexed consumer,
         address callbackTarget,
         uint256 intervalSeconds,
-        uint256 baseCostUnits,
+        uint256 feePerCycle,
         uint256 estimatedGasCostWei,
         uint256 maxFulfillments
     );
@@ -102,6 +100,7 @@ contract X402CKeepAlive {
         address indexed fulfiller,
         uint256 cycleNumber,
         uint256 agentPayout,
+        uint256 protocolFee,
         bool callbackSuccess
     );
 
@@ -126,6 +125,8 @@ contract X402CKeepAlive {
     error ZeroAmount();
     error ZeroAddress();
     error ZeroInterval();
+    error FeeOutOfRange();
+    error ConditionNotMet();
     error Reentrancy();
     error OracleNotSet();
     error BuybackModuleNotSet();
@@ -179,12 +180,13 @@ contract X402CKeepAlive {
         address callbackTarget,
         uint256 callbackGasLimit,
         uint256 intervalSeconds,
-        uint256 baseCostUnits,
+        uint256 feePerCycle,
         uint256 estimatedGasCostWei,
         uint256 maxFulfillments
     ) external returns (bytes32 subscriptionId) {
         if (callbackTarget == address(0)) revert ZeroAddress();
         if (intervalSeconds == 0) revert ZeroInterval();
+        if (feePerCycle < MIN_FEE || feePerCycle > MAX_FEE) revert FeeOutOfRange();
 
         subscriptionId = keccak256(abi.encodePacked(
             msg.sender,
@@ -199,7 +201,7 @@ contract X402CKeepAlive {
             callbackTarget: callbackTarget,
             callbackGasLimit: callbackGasLimit,
             intervalSeconds: intervalSeconds,
-            baseCostUnits: baseCostUnits,
+            feePerCycle: feePerCycle,
             estimatedGasCostWei: estimatedGasCostWei,
             maxFulfillments: maxFulfillments,
             fulfillmentCount: 0,
@@ -214,7 +216,7 @@ contract X402CKeepAlive {
             msg.sender,
             callbackTarget,
             intervalSeconds,
-            baseCostUnits,
+            feePerCycle,
             estimatedGasCostWei,
             maxFulfillments
         );
@@ -242,7 +244,7 @@ contract X402CKeepAlive {
         bytes32 subscriptionId,
         uint256 callbackGasLimit,
         uint256 intervalSeconds,
-        uint256 baseCostUnits,
+        uint256 feePerCycle,
         uint256 estimatedGasCostWei,
         uint256 maxFulfillments
     ) external {
@@ -250,10 +252,11 @@ contract X402CKeepAlive {
         if (sub.consumer == address(0)) revert SubscriptionNotFound();
         if (sub.consumer != msg.sender) revert NotSubscriptionOwner();
         if (intervalSeconds == 0) revert ZeroInterval();
+        if (feePerCycle < MIN_FEE || feePerCycle > MAX_FEE) revert FeeOutOfRange();
 
         sub.callbackGasLimit = callbackGasLimit;
         sub.intervalSeconds = intervalSeconds;
-        sub.baseCostUnits = baseCostUnits;
+        sub.feePerCycle = feePerCycle;
         sub.estimatedGasCostWei = estimatedGasCostWei;
         sub.maxFulfillments = maxFulfillments;
 
@@ -264,8 +267,9 @@ contract X402CKeepAlive {
 
     /**
      * @notice Fulfill a keep-alive subscription. Anyone can call. First TX wins.
-     * @dev Checks interval timing, deducts cost from consumer balance,
-     *      pays caller, accumulates protocol fee, fires callback.
+     * @dev Checks consumer's shouldRun() condition first. If false, reverts (no charge).
+     *      Agent gets fee + gasReimbursement. Protocol gets 10% markup on fee.
+     *      Protocol fees accumulate and flush to buyback module for X402C distribution.
      */
     function fulfill(bytes32 subscriptionId) external nonReentrant {
         Subscription storage sub = subscriptions[subscriptionId];
@@ -282,12 +286,17 @@ contract X402CKeepAlive {
             revert MaxFulfillmentsReached();
         }
 
-        // Compute cost
-        uint256 baseCost = sub.baseCostUnits;
-        uint256 markup = (baseCost * MARKUP_BPS) / BPS_DENOMINATOR;
+        // Check consumer's condition (shouldRun). Reverts if false — no charge.
+        if (!_checkCondition(sub.callbackTarget, subscriptionId)) {
+            revert ConditionNotMet();
+        }
+
+        // Compute cost: fee + 10% markup + gas reimbursement
+        uint256 fee = sub.feePerCycle;
+        uint256 markup = (fee * MARKUP_BPS) / BPS_DENOMINATOR;
         if (markup > MAX_MARKUP) markup = MAX_MARKUP;
         uint256 gasReimbursement = _computeGasReimbursement(sub.estimatedGasCostWei);
-        uint256 totalCost = baseCost + markup + gasReimbursement;
+        uint256 totalCost = fee + markup + gasReimbursement;
 
         // Deduct from consumer
         if (balances[sub.consumer] < totalCost) revert InsufficientBalance();
@@ -303,14 +312,14 @@ contract X402CKeepAlive {
             sub.active = false;
         }
 
-        // Pay agent: baseCost + gasReimbursement
-        uint256 agentPayout = baseCost + gasReimbursement;
+        // Pay agent: fee + gasReimbursement
+        uint256 agentPayout = fee + gasReimbursement;
         if (agentPayout > 0) {
             bool ok = usdc.transfer(msg.sender, agentPayout);
             if (!ok) revert TransferFailed();
         }
 
-        // Accumulate protocol fee
+        // Accumulate protocol fee (markup → buyback → X402C distribution)
         if (markup > 0) {
             protocolFeesAccumulator += markup;
             totalProtocolFeesUSDC += markup;
@@ -326,6 +335,7 @@ contract X402CKeepAlive {
             msg.sender,
             sub.fulfillmentCount,
             agentPayout,
+            markup,
             callbackSuccess
         );
     }
@@ -351,6 +361,10 @@ contract X402CKeepAlive {
         emit BuybackModuleSet(module);
     }
 
+    /**
+     * @notice Flush accumulated protocol fees to buyback module.
+     *         Buyback converts USDC → ETH → X402C → 50/50 staking + hook donate.
+     */
     function flushProtocolFees() external onlyOwner {
         if (address(buybackModule) == address(0)) revert BuybackModuleNotSet();
         uint256 amount = protocolFeesAccumulator;
@@ -403,33 +417,38 @@ contract X402CKeepAlive {
     }
 
     function getSubscriptionCost(bytes32 id) external view returns (
-        uint256 baseCost,
+        uint256 fee,
         uint256 markup,
         uint256 gasReimbursement,
         uint256 total
     ) {
         Subscription storage sub = subscriptions[id];
-        baseCost = sub.baseCostUnits;
-        markup = (baseCost * MARKUP_BPS) / BPS_DENOMINATOR;
+        fee = sub.feePerCycle;
+        markup = (fee * MARKUP_BPS) / BPS_DENOMINATOR;
         if (markup > MAX_MARKUP) markup = MAX_MARKUP;
         gasReimbursement = _computeGasReimbursement(sub.estimatedGasCostWei);
-        total = baseCost + markup + gasReimbursement;
+        total = fee + markup + gasReimbursement;
     }
 
+    /**
+     * @notice Check if a subscription can be fulfilled right now.
+     *         Checks: active, interval, max fulfillments, balance, and consumer's shouldRun().
+     *         Agents poll this to find work.
+     */
     function isReady(bytes32 id) external view returns (bool) {
         Subscription storage sub = subscriptions[id];
         if (!sub.active) return false;
         if (sub.maxFulfillments > 0 && sub.fulfillmentCount >= sub.maxFulfillments) return false;
         if (sub.lastFulfilled != 0 && block.timestamp < sub.lastFulfilled + sub.intervalSeconds) return false;
 
-        // Check if consumer has enough balance
-        uint256 baseCost = sub.baseCostUnits;
-        uint256 markup = (baseCost * MARKUP_BPS) / BPS_DENOMINATOR;
+        uint256 fee = sub.feePerCycle;
+        uint256 markup = (fee * MARKUP_BPS) / BPS_DENOMINATOR;
         if (markup > MAX_MARKUP) markup = MAX_MARKUP;
         uint256 gasReimbursement = _computeGasReimbursement(sub.estimatedGasCostWei);
-        uint256 totalCost = baseCost + markup + gasReimbursement;
+        if (balances[sub.consumer] < fee + markup + gasReimbursement) return false;
 
-        return balances[sub.consumer] >= totalCost;
+        // Check consumer's condition
+        return _checkCondition(sub.callbackTarget, id);
     }
 
     function getBalance(address account) external view returns (uint256) {
@@ -458,6 +477,19 @@ contract X402CKeepAlive {
     }
 
     // ========== INTERNAL ==========
+
+    /**
+     * @notice Check consumer's shouldRun() condition.
+     *         If the consumer doesn't implement shouldRun() (reverts), returns true (always ready).
+     *         This makes shouldRun() optional — consumers without conditions work as before.
+     */
+    function _checkCondition(address callbackTarget, bytes32 subscriptionId) internal view returns (bool) {
+        try IX402CKeepAliveConsumer(callbackTarget).shouldRun(subscriptionId) returns (bool ready) {
+            return ready;
+        } catch {
+            return true; // No condition implemented, always ready
+        }
+    }
 
     function _executeCallback(bytes32 subscriptionId, Subscription storage sub) internal returns (bool) {
         if (sub.callbackGasLimit == 0) return true;
