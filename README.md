@@ -240,7 +240,7 @@ All source code is public on Basescan:
 - [X402C Price Oracle](https://basescan.org/address/0xdc5c2E4316f516982c9caAC4d28827245e89bf53#code) - ETH/USDC gas pricing
 - [X402C Governor](https://basescan.org/address/0x9b9CB431002685aEF9A3f5203A8FF5DB8A8c5781#code) - DAO governance
 - [X402C Token](https://basescan.org/address/0x001373f663c235a2112A14e03799813EAa7bC6F1#code) - ERC20Votes governance token
-- [X402C KeepAlive](https://basescan.org/address/0x2f5e58C64D5C3F8c0AbCA959d3dB71c134AB0BA6#code) - subscription-based keep-alive
+- [X402C KeepAlive](https://basescan.org/address/0xD911D3A62DD81Af99106d6aF3E98620E60dE2749#code) - subscription-based keep-alive
 
 ## Pricing
 
@@ -269,7 +269,7 @@ Browse all endpoints at [x402c.org/hub](https://x402c.org/hub).
 | USDC | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/address/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) |
 | X402C Token | [`0x001373f663c235a2112A14e03799813EAa7bC6F1`](https://basescan.org/address/0x001373f663c235a2112A14e03799813EAa7bC6F1) |
 | Demo Consumer | [`0xC707AB8905865f1E97f5CaBf3d2ae798dcb7827a`](https://basescan.org/address/0xC707AB8905865f1E97f5CaBf3d2ae798dcb7827a) |
-| KeepAlive | [`0x2f5e58C64D5C3F8c0AbCA959d3dB71c134AB0BA6`](https://basescan.org/address/0x2f5e58C64D5C3F8c0AbCA959d3dB71c134AB0BA6) |
+| KeepAlive | [`0xD911D3A62DD81Af99106d6aF3E98620E60dE2749`](https://basescan.org/address/0xD911D3A62DD81Af99106d6aF3E98620E60dE2749) |
 
 ## Files
 
