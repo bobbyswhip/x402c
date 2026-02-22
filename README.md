@@ -240,7 +240,7 @@ All source code is public on Basescan:
 - [X402C Price Oracle](https://basescan.org/address/0xdc5c2E4316f516982c9caAC4d28827245e89bf53#code) - ETH/USDC gas pricing
 - [X402C Governor](https://basescan.org/address/0x9b9CB431002685aEF9A3f5203A8FF5DB8A8c5781#code) - DAO governance
 - [X402C Token](https://basescan.org/address/0x001373f663c235a2112A14e03799813EAa7bC6F1#code) - ERC20Votes governance token
-- [X402C KeepAlive](https://basescan.org/address/0xD911D3A62DD81Af99106d6aF3E98620E60dE2749#code) - subscription-based keep-alive
+- [X402C KeepAlive](https://basescan.org/address/0x8b5f10E15f564A7BceaA402068edD94711d68cBF#code) - subscription-based keep-alive
 
 ## Pricing
 
@@ -269,7 +269,7 @@ Browse all endpoints at [x402c.org/hub](https://x402c.org/hub).
 | USDC | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/address/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) |
 | X402C Token | [`0x001373f663c235a2112A14e03799813EAa7bC6F1`](https://basescan.org/address/0x001373f663c235a2112A14e03799813EAa7bC6F1) |
 | Demo Consumer | [`0xC707AB8905865f1E97f5CaBf3d2ae798dcb7827a`](https://basescan.org/address/0xC707AB8905865f1E97f5CaBf3d2ae798dcb7827a) |
-| KeepAlive | [`0xD911D3A62DD81Af99106d6aF3E98620E60dE2749`](https://basescan.org/address/0xD911D3A62DD81Af99106d6aF3E98620E60dE2749) |
+| KeepAlive | [`0x8b5f10E15f564A7BceaA402068edD94711d68cBF`](https://basescan.org/address/0x8b5f10E15f564A7BceaA402068edD94711d68cBF) |
 
 ## Files
 
@@ -354,11 +354,12 @@ function shouldRun(bytes32) external view returns (bool) {
 keepAlive.depositUSDC(500_000); // $0.50
 
 keepAlive.createSubscription(
-    myConsumer,    // callbackTarget
-    200_000,       // callbackGasLimit (also determines gas reimbursement)
-    3600,          // intervalSeconds (1 hour)
-    50_000,        // feePerCycle ($0.05, range: $0.001 - $1.00)
-    0              // maxFulfillments (0 = unlimited)
+    myConsumer,          // callbackTarget
+    200_000,             // callbackGasLimit
+    3600,                // intervalSeconds (1 hour)
+    50_000,              // feePerCycle ($0.05, range: $0.001 - $1.00)
+    8_000_000_000_000,   // estimatedGasCostWei (0.000008 ETH, observed TX cost)
+    0                    // maxFulfillments (0 = unlimited)
 );
 ```
 
@@ -366,19 +367,17 @@ Fee must be between $0.001 and $1.00 USDC per cycle.
 
 ### Gas reimbursement
 
-Gas reimbursement is computed from the subscription's `callbackGasLimit` using admin-set gas parameters:
+Each subscription declares its own `estimatedGasCostWei` — the observed actual TX cost in wei. The oracle converts this to USDC at the current ETH price:
 
 ```
-totalGas = fulfillOverheadGas + callbackGasLimit
-gasCostWei = totalGas * weiPerGas
-gasReimbursement = oracle.estimateGasCostUsdc(gasCostWei)
+gasReimbursement = oracle.estimateGasCostUsdc(estimatedGasCostWei)
 ```
 
-- `fulfillOverheadGas` — gas used by `fulfill()` excluding the callback (~150k on Base)
-- `weiPerGas` — effective wei-per-gas on Base L2 (L2 execution + L1 data posting, ~16 gwei observed)
-- The oracle converts ETH cost to USDC at the current market rate
+This matches the hub's gas model exactly. Set `estimatedGasCostWei` based on observed fulfill TX costs on Base. For a typical 500k-gas callback, `0.000008 ETH` (8e12 wei) is a reasonable starting point (~$0.015 at $1900 ETH).
 
-Consumers don't set gas costs. They declare `callbackGasLimit` (how much compute their callback uses), and the protocol computes reimbursement from that. Call `estimateGasReimbursement(callbackGasLimit)` to preview the cost before subscribing.
+No artificial limits — heavy callbacks that cost more gas just need a higher `estimatedGasCostWei`. Call `estimateGasReimbursement(gasCostWei)` to preview the USDC reimbursement before subscribing.
+
+The admin can override a subscription's gas cost via `setSubscriptionGasCost()` if the consumer set it too low or too high.
 
 ### Fund recovery
 
@@ -407,7 +406,7 @@ Consumer                    KeepAlive                       Agent
    |                           |                              |
 ```
 
-10% markup on fee goes to protocol (buyback → X402C distribution, same as the hub). Agent gets fee + gas reimbursement. Gas reimbursement is computed from the subscription's `callbackGasLimit` and admin-set gas config, converted to USDC via the price oracle.
+10% markup on fee goes to protocol (buyback → X402C distribution, same as the hub). Agent gets fee + gas reimbursement. Gas reimbursement is computed from the subscription's `estimatedGasCostWei`, converted to USDC via the price oracle.
 
 `isReady(subscriptionId)` checks everything: active, interval, balance, max fulfillments, and `shouldRun()`. Agents poll this to find work.
 

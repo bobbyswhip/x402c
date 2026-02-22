@@ -17,7 +17,6 @@ interface IX402CBuybackModule {
 interface IX402CPriceOracle {
     function getEthPriceUsdc() external view returns (uint256);
     function estimateGasCostUsdc(uint256 gasCostWei) external view returns (uint256);
-    function estimateGasCostFromUnits(uint256 gasUnits, uint256 gasPriceWei) external view returns (uint256);
 }
 
 /**
@@ -27,19 +26,17 @@ interface IX402CPriceOracle {
  *
  * Fee model:
  *   Consumer sets a fee per cycle ($0.001 - $1 USDC).
- *   10% markup on fee goes to protocol (flushable to buyback → X402C distribution).
- *   Gas reimbursement computed from callbackGasLimit + fulfill overhead:
- *     totalGas = fulfillOverheadGas + callbackGasLimit
- *     gasCostWei = totalGas * weiPerGas
- *     gasReimbursement = oracle.estimateGasCostUsdc(gasCostWei)
+ *   10% markup on fee goes to protocol (flushable to buyback -> X402C distribution).
+ *   Gas reimbursement = oracle.estimateGasCostUsdc(estimatedGasCostWei).
+ *   Consumer declares estimatedGasCostWei per subscription (observed actual TX cost in wei).
  *   Agent gets: fee + gasReimbursement.
  *   Protocol gets: markup (10% of fee, capped at $1).
  *
- * Gas config (admin-set):
- *   fulfillOverheadGas — gas used by fulfill() excluding the callback (~150k)
- *   weiPerGas — effective wei-per-gas on Base L2 (includes L1 data costs)
- *   Admin adjusts these based on observed on-chain costs.
- *   Consumer only declares callbackGasLimit (how much compute their callback uses).
+ * Gas model matches the Hub exactly:
+ *   Each subscription has its own estimatedGasCostWei (like Hub has per endpoint).
+ *   Consumer/admin sets this based on observed actual TX costs on Base L2.
+ *   Oracle converts wei to USDC at current ETH price.
+ *   No artificial limits — heavy callbacks are fine as long as consumer pays.
  *
  * No agent registration required. Any address can call fulfill().
  */
@@ -60,15 +57,11 @@ contract X402CKeepAlive {
     mapping(bytes32 => Subscription) public subscriptions;
     bytes32[] public subscriptionIds;
 
-    // Protocol fee accumulator (markup → buyback → X402C distribution)
+    // Protocol fee accumulator (markup -> buyback -> X402C distribution)
     uint256 public protocolFeesAccumulator;
     uint256 public totalProtocolFeesUSDC;
     uint256 public totalVolumeUSDC;
     uint256 public totalFulfillments;
-
-    // Gas config — admin-set, based on observed Base L2 costs
-    uint256 public fulfillOverheadGas;  // gas used by fulfill() excluding callback
-    uint256 public weiPerGas;           // effective wei-per-gas (L2 execution + L1 data)
 
     // Reentrancy guard
     bool private _locked;
@@ -86,9 +79,10 @@ contract X402CKeepAlive {
     struct Subscription {
         address consumer;            // who registered and pays
         address callbackTarget;      // contract to call back
-        uint256 callbackGasLimit;    // gas cap per callback — also determines gas reimbursement
+        uint256 callbackGasLimit;    // gas cap per callback
         uint256 intervalSeconds;     // min time between cycles
         uint256 feePerCycle;         // USDC fee per cycle (6 decimals), goes to agent
+        uint256 estimatedGasCostWei; // observed actual TX cost in wei — oracle converts to USDC
         uint256 maxFulfillments;     // 0 = unlimited
         uint256 fulfillmentCount;    // how many times fulfilled
         uint256 lastFulfilled;       // timestamp of last fulfill
@@ -104,6 +98,7 @@ contract X402CKeepAlive {
         uint256 callbackGasLimit,
         uint256 intervalSeconds,
         uint256 feePerCycle,
+        uint256 estimatedGasCostWei,
         uint256 maxFulfillments
     );
     event SubscriptionCancelled(bytes32 indexed subscriptionId, address indexed consumer, uint256 refunded);
@@ -123,7 +118,6 @@ contract X402CKeepAlive {
     event ProtocolFeesWithdrawn(address indexed admin, uint256 amount);
     event BuybackModuleSet(address indexed module);
     event PriceOracleUpdated(address indexed oracle);
-    event GasConfigUpdated(uint256 fulfillOverheadGas, uint256 weiPerGas);
     event OwnershipTransferred(address indexed oldOwner, address indexed newOwner);
     event FundsRecovered(address indexed admin, address token, uint256 amount);
 
@@ -146,7 +140,6 @@ contract X402CKeepAlive {
     error BuybackModuleNotSet();
     error NoFeesToWithdraw();
     error NotSubscriptionOwner();
-    error GasConfigNotSet();
 
     // ========== MODIFIERS ==========
 
@@ -164,12 +157,10 @@ contract X402CKeepAlive {
 
     // ========== CONSTRUCTOR ==========
 
-    constructor(address _usdc, address _priceOracle, uint256 _fulfillOverheadGas, uint256 _weiPerGas) {
+    constructor(address _usdc, address _priceOracle) {
         usdc = IERC20(_usdc);
         owner = msg.sender;
         priceOracle = IX402CPriceOracle(_priceOracle);
-        fulfillOverheadGas = _fulfillOverheadGas;
-        weiPerGas = _weiPerGas;
     }
 
     // ========== CONSUMER: DEPOSIT / WITHDRAW ==========
@@ -198,6 +189,7 @@ contract X402CKeepAlive {
         uint256 callbackGasLimit,
         uint256 intervalSeconds,
         uint256 feePerCycle,
+        uint256 estimatedGasCostWei,
         uint256 maxFulfillments
     ) external returns (bytes32 subscriptionId) {
         if (callbackTarget == address(0)) revert ZeroAddress();
@@ -218,6 +210,7 @@ contract X402CKeepAlive {
             callbackGasLimit: callbackGasLimit,
             intervalSeconds: intervalSeconds,
             feePerCycle: feePerCycle,
+            estimatedGasCostWei: estimatedGasCostWei,
             maxFulfillments: maxFulfillments,
             fulfillmentCount: 0,
             lastFulfilled: 0,
@@ -233,6 +226,7 @@ contract X402CKeepAlive {
             callbackGasLimit,
             intervalSeconds,
             feePerCycle,
+            estimatedGasCostWei,
             maxFulfillments
         );
     }
@@ -260,6 +254,7 @@ contract X402CKeepAlive {
         uint256 callbackGasLimit,
         uint256 intervalSeconds,
         uint256 feePerCycle,
+        uint256 estimatedGasCostWei,
         uint256 maxFulfillments
     ) external {
         Subscription storage sub = subscriptions[subscriptionId];
@@ -271,8 +266,19 @@ contract X402CKeepAlive {
         sub.callbackGasLimit = callbackGasLimit;
         sub.intervalSeconds = intervalSeconds;
         sub.feePerCycle = feePerCycle;
+        sub.estimatedGasCostWei = estimatedGasCostWei;
         sub.maxFulfillments = maxFulfillments;
 
+        emit SubscriptionUpdated(subscriptionId);
+    }
+
+    /**
+     * @notice Admin override for gas cost if consumer set it wrong.
+     */
+    function setSubscriptionGasCost(bytes32 subscriptionId, uint256 estimatedGasCostWei) external onlyOwner {
+        Subscription storage sub = subscriptions[subscriptionId];
+        if (sub.consumer == address(0)) revert SubscriptionNotFound();
+        sub.estimatedGasCostWei = estimatedGasCostWei;
         emit SubscriptionUpdated(subscriptionId);
     }
 
@@ -282,7 +288,7 @@ contract X402CKeepAlive {
      * @notice Fulfill a keep-alive subscription. Anyone can call. First TX wins.
      * @dev Checks consumer's shouldRun() condition first. If false, reverts (no charge).
      *      Agent gets fee + gasReimbursement. Protocol gets 10% markup on fee.
-     *      Gas reimbursement = oracle price for (fulfillOverheadGas + callbackGasLimit) * weiPerGas.
+     *      Gas reimbursement = oracle.estimateGasCostUsdc(sub.estimatedGasCostWei).
      */
     function fulfill(bytes32 subscriptionId) external nonReentrant {
         Subscription storage sub = subscriptions[subscriptionId];
@@ -304,11 +310,11 @@ contract X402CKeepAlive {
             revert ConditionNotMet();
         }
 
-        // Compute cost: fee + 10% markup + gas reimbursement (from callbackGasLimit)
+        // Compute cost: fee + 10% markup + gas reimbursement
         uint256 fee = sub.feePerCycle;
         uint256 markup = (fee * MARKUP_BPS) / BPS_DENOMINATOR;
         if (markup > MAX_MARKUP) markup = MAX_MARKUP;
-        uint256 gasReimbursement = _computeGasReimbursement(sub.callbackGasLimit);
+        uint256 gasReimbursement = _computeGasReimbursement(sub.estimatedGasCostWei);
         uint256 totalCost = fee + markup + gasReimbursement;
 
         // Deduct from consumer
@@ -332,7 +338,7 @@ contract X402CKeepAlive {
             if (!ok) revert TransferFailed();
         }
 
-        // Accumulate protocol fee (markup → buyback → X402C distribution)
+        // Accumulate protocol fee (markup -> buyback -> X402C distribution)
         if (markup > 0) {
             protocolFeesAccumulator += markup;
             totalProtocolFeesUSDC += markup;
@@ -353,21 +359,6 @@ contract X402CKeepAlive {
         );
     }
 
-    // ========== GAS CONFIG (ADMIN) ==========
-
-    /**
-     * @notice Set gas parameters used to compute reimbursement.
-     * @param _fulfillOverheadGas Gas used by fulfill() excluding callback (~150k observed).
-     * @param _weiPerGas Effective wei-per-gas on Base L2 (L2 execution + L1 data posting).
-     *        Admin observes actual TX costs and adjusts. E.g., if a 500k-gas TX costs
-     *        0.000008 ETH, then weiPerGas ≈ 0.000008e18 / 500000 = 16_000_000_000 (16 gwei).
-     */
-    function setGasConfig(uint256 _fulfillOverheadGas, uint256 _weiPerGas) external onlyOwner {
-        fulfillOverheadGas = _fulfillOverheadGas;
-        weiPerGas = _weiPerGas;
-        emit GasConfigUpdated(_fulfillOverheadGas, _weiPerGas);
-    }
-
     // ========== PRICE ORACLE ==========
 
     function setPriceOracle(address _oracle) external onlyOwner {
@@ -377,17 +368,13 @@ contract X402CKeepAlive {
     }
 
     /**
-     * @notice Compute gas reimbursement in USDC from callback gas limit.
-     *         totalGas = fulfillOverheadGas + callbackGasLimit
-     *         gasCostWei = totalGas * weiPerGas
-     *         reimbursement = oracle.estimateGasCostUsdc(gasCostWei)
+     * @notice Compute gas reimbursement in USDC from estimatedGasCostWei.
+     *         Matches the Hub: oracle.estimateGasCostUsdc(estimatedGasCostWei).
      */
-    function _computeGasReimbursement(uint256 callbackGasLimit) internal view returns (uint256) {
+    function _computeGasReimbursement(uint256 estimatedGasCostWei) internal view returns (uint256) {
         if (address(priceOracle) == address(0)) revert OracleNotSet();
-        if (weiPerGas == 0) revert GasConfigNotSet();
-        uint256 totalGas = fulfillOverheadGas + callbackGasLimit;
-        uint256 gasCostWei = totalGas * weiPerGas;
-        return priceOracle.estimateGasCostUsdc(gasCostWei);
+        if (estimatedGasCostWei == 0) return 0;
+        return priceOracle.estimateGasCostUsdc(estimatedGasCostWei);
     }
 
     // ========== BUYBACK ==========
@@ -400,7 +387,7 @@ contract X402CKeepAlive {
 
     /**
      * @notice Flush accumulated protocol fees to buyback module.
-     *         Buyback converts USDC → ETH → X402C → 50/50 staking + hook donate.
+     *         Buyback converts USDC -> ETH -> X402C -> 50/50 staking + hook donate.
      */
     function flushProtocolFees() external onlyOwner {
         if (address(buybackModule) == address(0)) revert BuybackModuleNotSet();
@@ -463,16 +450,16 @@ contract X402CKeepAlive {
         fee = sub.feePerCycle;
         markup = (fee * MARKUP_BPS) / BPS_DENOMINATOR;
         if (markup > MAX_MARKUP) markup = MAX_MARKUP;
-        gasReimbursement = _computeGasReimbursement(sub.callbackGasLimit);
+        gasReimbursement = _computeGasReimbursement(sub.estimatedGasCostWei);
         total = fee + markup + gasReimbursement;
     }
 
     /**
-     * @notice Estimate gas reimbursement for a given callback gas limit.
-     *         Agents and consumers call this to preview costs before subscribing.
+     * @notice Estimate gas reimbursement for a given gas cost in wei.
+     *         Simple oracle passthrough — matches Hub's estimateGasReimbursement().
      */
-    function estimateGasReimbursement(uint256 callbackGasLimit) external view returns (uint256) {
-        return _computeGasReimbursement(callbackGasLimit);
+    function estimateGasReimbursement(uint256 gasCostWei) external view returns (uint256) {
+        return _computeGasReimbursement(gasCostWei);
     }
 
     /**
@@ -489,7 +476,7 @@ contract X402CKeepAlive {
         uint256 fee = sub.feePerCycle;
         uint256 markup = (fee * MARKUP_BPS) / BPS_DENOMINATOR;
         if (markup > MAX_MARKUP) markup = MAX_MARKUP;
-        uint256 gasReimbursement = _computeGasReimbursement(sub.callbackGasLimit);
+        uint256 gasReimbursement = _computeGasReimbursement(sub.estimatedGasCostWei);
         if (balances[sub.consumer] < fee + markup + gasReimbursement) return false;
 
         // Check consumer's condition
@@ -503,10 +490,6 @@ contract X402CKeepAlive {
     function getEthPrice() external view returns (uint256) {
         if (address(priceOracle) == address(0)) revert OracleNotSet();
         return priceOracle.getEthPriceUsdc();
-    }
-
-    function getGasConfig() external view returns (uint256, uint256) {
-        return (fulfillOverheadGas, weiPerGas);
     }
 
     function getStats() external view returns (
