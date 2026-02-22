@@ -240,6 +240,7 @@ All source code is public on Basescan:
 - [X402C Price Oracle](https://basescan.org/address/0xdc5c2E4316f516982c9caAC4d28827245e89bf53#code) - ETH/USDC gas pricing
 - [X402C Governor](https://basescan.org/address/0x9b9CB431002685aEF9A3f5203A8FF5DB8A8c5781#code) - DAO governance
 - [X402C Token](https://basescan.org/address/0x001373f663c235a2112A14e03799813EAa7bC6F1#code) - ERC20Votes governance token
+- [X402C KeepAlive](https://basescan.org/address/0x619473200cd7A213f4A1292e72a3d89003AFe3f9#code) - subscription-based keep-alive
 
 ## Pricing
 
@@ -268,6 +269,7 @@ Browse all endpoints at [x402c.org/hub](https://x402c.org/hub).
 | USDC | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/address/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) |
 | X402C Token | [`0x001373f663c235a2112A14e03799813EAa7bC6F1`](https://basescan.org/address/0x001373f663c235a2112A14e03799813EAa7bC6F1) |
 | Demo Consumer | [`0xC707AB8905865f1E97f5CaBf3d2ae798dcb7827a`](https://basescan.org/address/0xC707AB8905865f1E97f5CaBf3d2ae798dcb7827a) |
+| KeepAlive | [`0x619473200cd7A213f4A1292e72a3d89003AFe3f9`](https://basescan.org/address/0x619473200cd7A213f4A1292e72a3d89003AFe3f9) |
 
 ## Files
 
@@ -275,13 +277,86 @@ Browse all endpoints at [x402c.org/hub](https://x402c.org/hub).
 contracts/
   X402CConsumerBase.sol       # Inherit this, handles hub callback routing
   X402CDemoConsumer.sol        # Working example (single-TX pattern)
+  X402CKeepAlive.sol           # Subscription-based keep-alive contract
   interfaces/
-    IX402CConsumer.sol         # Callback interface your contract implements
+    IX402CConsumer.sol         # Callback interface for hub consumers
+    IX402CKeepAliveConsumer.sol # Callback interface for keep-alive consumers
 ```
 
-`X402CConsumerBase` is the abstract base. Inherit it and implement `_onFulfilled()`.
+`X402CConsumerBase` is the abstract base for hub consumers. Inherit it and implement `_onFulfilled()`.
 
 `X402CDemoConsumer` is a production example with USDC handling, response storage, and recovery functions.
+
+`X402CKeepAlive` is a standalone contract for periodic automated calls. Contracts register subscriptions, agents race to fulfill them.
+
+## Keep-alive subscriptions
+
+Contracts that need periodic calls (harvest, rebalance, poke) can register subscriptions on the KeepAlive contract. Any agent can fulfill them — first TX wins.
+
+### Write a keep-alive consumer
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import "./interfaces/IX402CKeepAliveConsumer.sol";
+
+contract MyKeepAliveConsumer is IX402CKeepAliveConsumer {
+    address public immutable keepAlive;
+    uint256 public lastPoke;
+
+    error OnlyKeepAlive();
+
+    constructor(address _keepAlive) {
+        keepAlive = _keepAlive;
+    }
+
+    function keepAliveCallback(bytes32 subscriptionId, uint256 cycleNumber) external override {
+        if (msg.sender != keepAlive) revert OnlyKeepAlive();
+        lastPoke = block.timestamp;
+        // your periodic logic here
+    }
+}
+```
+
+### Register a subscription
+
+```solidity
+// Approve USDC to KeepAlive contract, then:
+keepAlive.depositUSDC(500_000); // $0.50
+
+keepAlive.createSubscription(
+    myConsumer,    // callbackTarget
+    200_000,       // callbackGasLimit
+    3600,          // intervalSeconds (1 hour)
+    50_000,        // baseCostUnits ($0.05 per cycle)
+    8_000_000_000_000, // estimatedGasCostWei (0.000008 ETH)
+    0              // maxFulfillments (0 = unlimited)
+);
+```
+
+### How it works
+
+```
+Consumer                    KeepAlive                       Agent
+   |                           |                              |
+   |-- createSubscription ---->|                              |
+   |-- depositUSDC ----------->|                              |
+   |                           |                              |
+   |                           |<--- fulfill(subId) ----------|  (anyone, race condition)
+   |                           |  1. check interval + balance |
+   |                           |  2. deduct cost              |
+   |                           |  3. pay agent USDC           |
+   |                           |  4. try callback { gas cap } |
+   |<-- keepAliveCallback -----|     catch { success=false }  |
+   |                           |                              |
+```
+
+Same fee structure as the hub: 10% markup (capped at $1), oracle-based gas reimbursement. Agent gets baseCost + gasReimbursement, protocol gets markup.
+
+`isReady(subscriptionId)` returns true when a subscription can be fulfilled. Agents poll this to find work.
+
+Cancel anytime with `cancelSubscription()` — remaining USDC balance refunded immediately.
 
 ## Building an agent
 
