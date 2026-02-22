@@ -348,36 +348,59 @@ function shouldRun(bytes32) external view returns (bool) {
 
 `shouldRun()` is optional. If your consumer doesn't implement it, the subscription is always considered ready. Agents call `isReady(subscriptionId)` on the KeepAlive contract to check all conditions (interval, balance, and your `shouldRun()`) in one view call.
 
+### Pricing
+
+KeepAlive uses the same gas pricing model as the Hub. The admin sets `estimatedGasCostWei` per subscription based on observed fulfill TX costs. A Uniswap oracle converts that to USDC at the current ETH price. Consumers don't need to think about gas — the protocol handles it.
+
+```
+                              Hub                          KeepAlive
+                              ───                          ─────────
+Gas cost set by:              Admin (per endpoint)         Admin (per subscription)
+Gas cost source:              estimatedGasCostWei          estimatedGasCostWei
+Conversion:                   oracle.estimateGasCostUsdc() oracle.estimateGasCostUsdc()
+Tracks ETH price:             Yes (real-time)              Yes (real-time)
+```
+
+Each cycle costs:
+
+```
+totalCostPerCycle = fee + markup + gasReimbursement
+
+fee               → set by consumer ($0.001 - $1.00), paid to agent
+markup            → 10% of fee (capped at $1), goes to protocol buyback
+gasReimbursement  → oracle converts estimatedGasCostWei to USDC, paid to agent
+
+Example at $1900 ETH:
+  fee:              $0.050  (consumer chose $0.05 per poke)
+  markup:           $0.005  (10% of fee, to protocol)
+  gasReimbursement: $0.015  (0.000008 ETH via oracle)
+  ─────────────────────────
+  total:            $0.070  deducted from consumer's deposit per cycle
+  agent receives:   $0.065  (fee + gasReimbursement)
+```
+
+Check cost before subscribing:
+
+```solidity
+(uint256 fee, uint256 markup, uint256 gasReimb, uint256 total) = keepAlive.getSubscriptionCost(subId);
+```
+
 ### Register a subscription
 
 ```solidity
 keepAlive.depositUSDC(500_000); // $0.50
 
 keepAlive.createSubscription(
-    myConsumer,          // callbackTarget
-    200_000,             // callbackGasLimit
-    3600,                // intervalSeconds (1 hour)
-    50_000,              // feePerCycle ($0.05, range: $0.001 - $1.00)
-    8_000_000_000_000,   // estimatedGasCostWei (0.000008 ETH, observed TX cost)
-    0                    // maxFulfillments (0 = unlimited)
+    myConsumer,          // callbackTarget — your contract
+    200_000,             // callbackGasLimit — gas cap for callback execution
+    3600,                // intervalSeconds — minimum 1 hour between cycles
+    50_000,              // feePerCycle — $0.05 service fee to agent ($0.001 - $1.00)
+    8_000_000_000_000,   // estimatedGasCostWei — set by admin, same as Hub endpoints
+    0                    // maxFulfillments — 0 = unlimited cycles
 );
 ```
 
-Fee must be between $0.001 and $1.00 USDC per cycle.
-
-### Gas reimbursement
-
-Each subscription declares its own `estimatedGasCostWei` — the observed actual TX cost in wei. The oracle converts this to USDC at the current ETH price:
-
-```
-gasReimbursement = oracle.estimateGasCostUsdc(estimatedGasCostWei)
-```
-
-This matches the hub's gas model exactly. Set `estimatedGasCostWei` based on observed fulfill TX costs on Base. For a typical 500k-gas callback, `0.000008 ETH` (8e12 wei) is a reasonable starting point (~$0.015 at $1900 ETH).
-
-No artificial limits — heavy callbacks that cost more gas just need a higher `estimatedGasCostWei`. Call `estimateGasReimbursement(gasCostWei)` to preview the USDC reimbursement before subscribing.
-
-The admin can override a subscription's gas cost via `setSubscriptionGasCost()` if the consumer set it too low or too high.
+`estimatedGasCostWei` is the observed actual TX cost in wei, same as Hub endpoints. The admin sets this based on real fulfill TX costs on Base (check Basescan). For most callbacks, `0.000008 ETH` (8e12 wei) covers a ~500k gas TX. Heavier callbacks cost more — no limits. The admin can adjust any subscription's gas cost via `setSubscriptionGasCost()` without the consumer redeploying.
 
 ### Fund recovery
 
@@ -399,18 +422,18 @@ Consumer                    KeepAlive                       Agent
    |                           |<--- fulfill(subId) ----------|  (anyone, race condition)
    |                           |  1. check interval + balance |
    |                           |  2. check shouldRun()        |
-   |                           |  3. deduct cost              |
-   |                           |  4. pay agent USDC           |
+   |                           |  3. deduct cost from deposit |
+   |                           |  4. pay agent (fee + gas)    |
    |                           |  5. try callback { gas cap } |
    |<-- keepAliveCallback -----|     catch { success=false }  |
    |                           |                              |
 ```
 
-10% markup on fee goes to protocol (buyback → X402C distribution, same as the hub). Agent gets fee + gas reimbursement. Gas reimbursement is computed from the subscription's `estimatedGasCostWei`, converted to USDC via the price oracle.
+Gas reimbursement uses the same oracle as the Hub — `estimatedGasCostWei` is converted to USDC via a Uniswap V2 ETH/USDC price feed. As ETH price moves, reimbursement adjusts automatically. Agents are never underpaid because the admin calibrates `estimatedGasCostWei` from real on-chain TX costs.
 
-`isReady(subscriptionId)` checks everything: active, interval, balance, max fulfillments, and `shouldRun()`. Agents poll this to find work.
+`isReady(subscriptionId)` checks everything in one view call: active, interval, balance, max fulfillments, and `shouldRun()`. Agents poll this to find work.
 
-Cancel anytime with `cancelSubscription()` — remaining USDC balance refunded immediately.
+Cancel anytime with `cancelSubscription()` — remaining deposit refunded immediately.
 
 ## Building an agent
 
