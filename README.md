@@ -355,15 +355,39 @@ keepAlive.depositUSDC(500_000); // $0.50
 
 keepAlive.createSubscription(
     myConsumer,    // callbackTarget
-    200_000,       // callbackGasLimit
+    200_000,       // callbackGasLimit (also determines gas reimbursement)
     3600,          // intervalSeconds (1 hour)
     50_000,        // feePerCycle ($0.05, range: $0.001 - $1.00)
-    8_000_000_000_000, // estimatedGasCostWei (0.000008 ETH)
     0              // maxFulfillments (0 = unlimited)
 );
 ```
 
 Fee must be between $0.001 and $1.00 USDC per cycle.
+
+### Gas reimbursement
+
+Gas reimbursement is computed from the subscription's `callbackGasLimit` using admin-set gas parameters:
+
+```
+totalGas = fulfillOverheadGas + callbackGasLimit
+gasCostWei = totalGas * weiPerGas
+gasReimbursement = oracle.estimateGasCostUsdc(gasCostWei)
+```
+
+- `fulfillOverheadGas` — gas used by `fulfill()` excluding the callback (~150k on Base)
+- `weiPerGas` — effective wei-per-gas on Base L2 (L2 execution + L1 data posting, ~16 gwei observed)
+- The oracle converts ETH cost to USDC at the current market rate
+
+Consumers don't set gas costs. They declare `callbackGasLimit` (how much compute their callback uses), and the protocol computes reimbursement from that. Call `estimateGasReimbursement(callbackGasLimit)` to preview the cost before subscribing.
+
+### Fund recovery
+
+Consumers can withdraw unused USDC at any time:
+
+```solidity
+keepAlive.withdrawUSDC(amount);       // pull out unused deposit
+keepAlive.cancelSubscription(subId);   // cancel + refund remaining balance
+```
 
 ### How it works
 
@@ -383,7 +407,7 @@ Consumer                    KeepAlive                       Agent
    |                           |                              |
 ```
 
-10% markup on fee goes to protocol (buyback → X402C distribution, same as the hub). Agent gets fee + gas reimbursement via oracle.
+10% markup on fee goes to protocol (buyback → X402C distribution, same as the hub). Agent gets fee + gas reimbursement. Gas reimbursement is computed from the subscription's `callbackGasLimit` and admin-set gas config, converted to USDC via the price oracle.
 
 `isReady(subscriptionId)` checks everything: active, interval, balance, max fulfillments, and `shouldRun()`. Agents poll this to find work.
 
