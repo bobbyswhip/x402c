@@ -1,8 +1,8 @@
 # X402C Protocol
 
-Build smart contracts that call any API. X402C is a decentralized API marketplace on Base where your contract can request off-chain data and receive verified responses via callback — paid in USDC with a single transaction.
+On-chain API calls paid in USDC. Your contract requests off-chain data, an agent fetches it and submits the response, the hub callbacks your contract with the result. One transaction from the user's perspective.
 
-## Quick Start
+## Quick start
 
 ### 1. Install
 
@@ -12,7 +12,7 @@ npm install @openzeppelin/contracts
 
 Copy `contracts/X402CConsumerBase.sol` and `contracts/interfaces/IX402CConsumer.sol` into your project.
 
-### 2. Write Your Consumer
+### 2. Write your consumer
 
 ```solidity
 // SPDX-License-Identifier: MIT
@@ -77,7 +77,7 @@ Deploy your consumer with:
 - `_hub`: `0x46048903457eA7976Aab09Ab379b52753531F08C` (X402C Hub on Base)
 - `_usdc`: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` (USDC on Base)
 
-### 4. Use It
+### 4. Use it
 
 ```
 1. User approves USDC to your consumer contract (one-time)
@@ -87,7 +87,7 @@ Deploy your consumer with:
 5. Read responses[requestId] on-chain
 ```
 
-## How It Works
+## How it works
 
 ```
 Your Contract                        X402C Hub                         Agent
@@ -103,11 +103,16 @@ Your Contract                        X402C Hub                         Agent
 
 ## Security
 
-We get asked about callback safety a lot, so this section walks through the actual attack surface and what the contracts do about it.
+### Fulfillment ordering
 
-### How fulfillment actually works
+The hub processes fulfillment in this order:
 
-The ordering inside `fulfillRequest()` matters. Here's the sequence:
+1. Validate: request is PENDING, caller owns the endpoint, response fits `maxResponseBytes`
+2. State change: mark request `FULFILLED`
+3. Pay agent: transfer USDC to agent and protocol
+4. Callback: call consumer's `_onFulfilled()` inside try/catch with gas cap
+
+State changes happen before external calls. Agent payment happens before callback. If the callback reverts, the agent is still paid and the request is still fulfilled.
 
 ```
 Consumer Contract          X402C Hub (nonReentrant)              Agent Wallet
@@ -130,11 +135,9 @@ Consumer Contract          X402C Hub (nonReentrant)              Agent Wallet
       |     try/catch wrapped)   |                                    |
 ```
 
-State gets marked `FULFILLED` before any external call happens. The agent gets paid before the callback runs. If the callback reverts, the hub catches it and records `success = false`, but the fulfillment still stands.
+### Callback safety
 
-### Can a malicious consumer steal from agents via callback?
-
-No. The call chain looks like this:
+The callback runs with `msg.sender = hub`, not the agent wallet. The call chain:
 
 ```
 Agent wallet -> fulfillRequest() -> Hub -> x402cCallback() -> Consumer contract
@@ -142,102 +145,76 @@ Agent wallet -> fulfillRequest() -> Hub -> x402cCallback() -> Consumer contract
                  = agent              = hub (not agent)
 ```
 
-Inside the callback, `msg.sender` is the hub contract. A malicious callback trying `USDC.transferFrom(tx.origin, attacker, ...)` would fail because the agent wallet never approved the consumer contract for any token. The agent has no relationship with the consumer at all.
+A malicious callback cannot drain the agent. `transferFrom(tx.origin, ...)` fails because the agent never approved the consumer contract. The agent has no token relationship with the consumer.
 
-The callback also runs with a hard gas cap (`endpoint.callbackGasLimit`, set by the agent). An infinite loop or storage bomb burns through that budget and stops. The agent already got paid before the callback started, so they lose nothing.
+The callback has a hard gas cap set by the agent (`endpoint.callbackGasLimit`). Infinite loops and storage bombs hit this cap and stop. `nonReentrant` on `fulfillRequest()` prevents the callback from re-entering the hub.
 
-A reentrancy lock (`nonReentrant`) on `fulfillRequest()` blocks the callback from calling back into the hub to double-fulfill or manipulate state.
+### Agent risks
 
-### Payment ordering
+| Risk | Protection |
+|------|-----------|
+| Callback wastes gas | Capped at `callbackGasLimit` (~$0.06 at 2M gas on Base). Agent already paid. |
+| Callback sneaks in `approve()` | `msg.sender` = hub, not agent. Agent never approved consumer for anything. |
+| Double fulfillment | Hub requires `status == PENDING`. Second call reverts. |
+| Unprofitable request | Agent simulates with `estimateGas()` + profitability check before submitting. |
+| Slashing | Only hub, governance timelock, and dispute resolver can slash. Capped at staked amount. |
 
-The hub follows checks-effects-interactions everywhere. The short version:
+### Consumer risks
 
-When creating a request, the consumer's balance is deducted *before* the request struct is written. If anything fails after that, the deduction already happened.
+| Risk | Protection |
+|------|-----------|
+| Agent doesn't respond | 5-minute timeout. Anyone can cancel. Consumer gets 100% gas reimbursement + 90% API cost back. |
+| Agent sends bad data | Dispute system: stake 100 X402C bond, resolver reviews in 3 days. Upheld = agent slashed 50%, bond returned. |
+| Overcharging | `getEndpointPrice()` returns exact USDC cost before request. Compare across agents. |
+| Oversized response | Hub rejects responses exceeding `maxResponseBytes` before callback runs. |
 
-When fulfilling, the request status flips to `FULFILLED` before any USDC transfer or callback. A revert in the transfer or callback can't undo the status change.
+### Access control
 
-When cancelling, the status flips to `CANCELLED` first, then the refund is credited internally, then the canceller's share transfers out.
-
-### What agents should worry about (and shouldn't)
-
-Could a consumer deploy a callback that wastes gas on purpose? Sure, but with the gas cap at 2M that burns ~$0.06 on Base. The agent is already paid by that point. It's a nuisance, not a theft vector.
-
-What about a callback that sneaks in an `approve()` call to drain the agent? Doesn't work. `msg.sender` inside the callback is the hub, not the agent wallet. The consumer can only approve tokens on behalf of itself. The agent never approved anything to the consumer contract.
-
-Double fulfillment isn't possible either. The hub checks `status == PENDING` before accepting a response. Second call reverts.
-
-The reference agent implementation simulates every fulfillment with `estimateGas()` before submitting and compares the gas cost to the reimbursement. If it's a losing trade, the agent just skips it.
-
-Slashing can only come from three addresses: the hub contract, the governance timelock, and the dispute resolver. The slash is capped at whatever the agent has staked.
-
-### What consumers should worry about
-
-If an agent doesn't respond, requests time out after 5 minutes. Anyone can cancel a timed-out request. The consumer gets 100% of gas reimbursement back plus 90% of the API cost.
-
-If an agent sends bad data, consumers can open a dispute by staking 100 X402C as a bond. A resolver reviews within 3 days. Upheld means the agent gets slashed 50% and the bond comes back. Rejected means the bond splits 50/50 between staker rewards and liquidity.
-
-You can check pricing before you commit. `getEndpointPrice()` returns the exact USDC cost, and you can compare across agents.
-
-The hub also rejects any response larger than the endpoint's `maxResponseBytes` setting, so an agent can't submit a huge payload that blows through your callback gas budget.
-
-### Who can do what
-
-Here's what each role can and can't do:
-
-| Role | Allowed | Not allowed |
-|------|---------|-------------|
+| Role | Can | Cannot |
+|------|-----|--------|
 | Owner | Add/remove admins, emergency token recovery | Fulfill requests, touch consumer balances |
 | Admin | Register agents, configure protocol settings | Move consumer deposits, override outcomes |
-| Agent | Register endpoints, fulfill own requests, set own pricing | Fulfill other agents' requests, access protocol fees |
+| Agent | Register endpoints, fulfill own requests, set pricing | Fulfill other agents' requests, access protocol fees |
 | Consumer | Deposit USDC, create requests, file disputes | Withdraw other consumers' funds |
-| Governance (timelock) | Execute proposals after 24h delay | Skip the delay, change contracts directly |
+| Governance (timelock) | Execute proposals after 24h delay | Skip delay, change contracts directly |
 
-Contract ownership has been transferred to a governance timelock with a 24-hour delay. Admin wallet changes, fee configuration, and module swaps all go through the timelock.
+Ownership is behind a 24-hour governance timelock. Config changes are visible on-chain before they execute.
 
-### Staking and slashing
+### Staking
 
-Agents stake X402C tokens as collateral. If they submit bad data or lose a dispute, they get slashed.
+Agents stake X402C tokens as collateral. Slashing happens on bad data (failed sanity check) or upheld disputes. Timeouts are not slashable, they only reduce reputation.
 
-Slashing only happens for bad data (failed sanity check) or upheld disputes. Timeouts don't trigger slashes, they just dock reputation. Slash proceeds split 50/50 between the staker reward pool and the V4 liquidity hook, so nobody profits directly from someone else getting slashed.
-
-There's a cooldown on unstaking. An agent can't see a dispute coming and yank their stake before it lands.
+Slash proceeds split 50/50: staker reward pool and V4 liquidity hook. Unstaking has a cooldown so agents can't withdraw before a pending slash lands.
 
 ### Disputes
 
 1. Consumer stakes 100 X402C bond, opens dispute with evidence
 2. Resolver reviews within 3 days
-3. Upheld: agent slashed 50%, bond returned to consumer
+3. Upheld: agent slashed 50%, bond returned
 4. Rejected: bond splits 50/50 (staker rewards + liquidity)
-5. If nobody resolves it within 10 days, the consumer reclaims their bond automatically
-
-The bond stops spam. The grace period stops resolvers from sitting on disputes indefinitely.
+5. No resolution in 10 days: consumer reclaims bond automatically
 
 ### Gas pricing
 
-Gas reimbursement comes from a Uniswap V2 oracle that reads the current ETH/USDC rate via `getAmountsOut`. The admin sets an estimated gas cost in wei per endpoint based on observed callback usage, and the oracle converts that to USDC.
+A Uniswap V2 oracle converts the endpoint's gas cost (set in wei by the admin) to USDC at the current ETH price. The cost is snapshotted at request creation, so ETH price movement between request and fulfillment doesn't affect either party.
 
-The gas cost is snapshotted when the request is created. If ETH price moves between request creation and fulfillment, neither the agent nor the consumer is affected, they both locked in the price at creation time.
+The oracle is swappable via `setPriceOracle()` without redeploying the hub.
 
-The oracle is swappable via `setPriceOracle()`. If V3 TWAP or Chainlink makes more sense later, the hub doesn't need to be redeployed.
+### Known limitations
 
-### What we know isn't perfect
+- **V2 spot oracle**: No TWAP. Flash loan manipulation is theoretically possible but gas reimbursement is $0.01-0.02 per request, making it unprofitable. Oracle is swappable.
+- **Owner emergency powers**: Behind 24h governance timelock. All actions visible on-chain before execution.
+- **Agents see request params**: Unavoidable, agents need params to call the API. ZK commitments prove response integrity.
+- **Silent callback failures**: Hub stores `callbackSuccess` and emits `CallbackExecuted`, but doesn't push-notify. Consumers should monitor this event.
 
-The oracle reads Uniswap V2 spot price, not a TWAP. A flash loan could manipulate ETH/USDC for one block, but gas reimbursement per request is $0.01-0.02, so there's nothing worth stealing. The oracle is swappable via `setPriceOracle()` if we move to V3 TWAP or Chainlink later.
-
-The owner wallet can recover stuck tokens and add admins. That wallet is behind a 24-hour governance timelock, so changes are visible on-chain a full day before they execute.
-
-Agents see request parameters. That's unavoidable because agents need them to call the API. ZK commitments on the response prove data integrity after the fact.
-
-Callback failures don't push-notify anyone. The hub stores `callbackSuccess = false` and emits `CallbackExecuted`, but consumers need to watch for it themselves.
-
-### Writing your consumer
+### Writing a consumer
 
 ```solidity
-// Inherit X402CConsumerBase. It handles callback routing and the onlyHub check.
+// Inherit X402CConsumerBase for callback routing and onlyHub protection.
 contract MyConsumer is X402CConsumerBase { ... }
 
-// Keep _onFulfilled() simple. Store data, emit an event, move on.
-// Don't make external calls here. The callback gas budget is limited.
+// Keep _onFulfilled() simple. Store data, emit event.
+// No external calls here, callback gas is limited.
 function _onFulfilled(bytes32 requestId, bytes calldata data) internal override {
     responses[requestId] = data;
     emit Fulfilled(requestId);
@@ -247,21 +224,17 @@ function _onFulfilled(bytes32 requestId, bytes calldata data) internal override 
 (, uint256 cost) = hub.getEndpointPrice(endpointId);
 ```
 
-Don't assume the callback always succeeds. Check the `CallbackExecuted` event or read `callbackSuccess` on-chain. Don't store large response blobs in the callback, every byte costs gas.
+Check `CallbackExecuted` events to confirm your callback ran. Don't store large blobs in the callback, every byte costs gas.
 
 ### Running an agent
 
-Set `callbackGasLimit` to something reasonable. 2M gas handles most cases. If your API returns 200 bytes, don't set `maxResponseBytes` to 10KB.
+Set `callbackGasLimit` conservatively (2M gas covers most cases). Match `maxResponseBytes` to your actual response size. Simulate with `estimateGas()` before submitting. Compare gas cost to reimbursement and skip unprofitable requests.
 
-Simulate fulfillment with `estimateGas()` before submitting. Compare the gas cost to the reimbursement. If it's a losing trade, skip it.
+### Verified contracts
 
-Your stake is your collateral. Higher stake means better reputation, but it also means more at risk if you get slashed.
+All source code is public on Basescan:
 
-### All contracts are verified
-
-Source code is public on Basescan:
-
-- [X402C Hub](https://basescan.org/address/0x46048903457eA7976Aab09Ab379b52753531F08C#code) - request/fulfill/callback logic
+- [X402C Hub](https://basescan.org/address/0x46048903457eA7976Aab09Ab379b52753531F08C#code) - request/fulfill/callback
 - [X402C Staking](https://basescan.org/address/0xd57905dc8eE86343Fd54Ba4Bb8cF68785F6326CB#code) - stake, slash, rewards
 - [X402C Dispute Resolver](https://basescan.org/address/0x27798a59635fb3E3F9e3373BDCAC8a78a43496bE#code) - consumer challenges
 - [X402C Price Oracle](https://basescan.org/address/0xdc5c2E4316f516982c9caAC4d28827245e89bf53#code) - ETH/USDC gas pricing
@@ -270,17 +243,15 @@ Source code is public on Basescan:
 
 ## Pricing
 
-Pricing is **dynamic and set by each agent** who registers an endpoint. There is no fixed protocol fee — agents compete on price.
+Each agent sets their own endpoint pricing. No fixed protocol fee.
 
 Each endpoint has:
-- **Base cost** — the agent's price for the API call (fractions of a cent)
-- **Gas reimbursement** — covers the on-chain callback TX cost, calculated via a live ETH/USDC oracle
+- Base cost: the agent's price for the API call (fractions of a cent)
+- Gas reimbursement: covers the on-chain callback TX cost, calculated via a live ETH/USDC oracle
 
-Call `hub.getEndpointPrice(endpointId)` on-chain to get the exact cost before making a request. It returns both the non-callback price and the callback-inclusive price in USDC (6 decimals).
+Call `hub.getEndpointPrice(endpointId)` on-chain to get the exact cost before making a request. Returns both non-callback and callback-inclusive price in USDC (6 decimals).
 
-Agents set their own pricing when registering endpoints. Cheaper agents attract more traffic. The marketplace is permissionless — anyone can register an endpoint and set competitive rates.
-
-## Available Endpoints
+## Available endpoints
 
 | Endpoint ID | Name | Description |
 |-------------|------|-------------|
@@ -293,8 +264,8 @@ Browse all endpoints at [x402c.org/hub](https://x402c.org/hub).
 
 | Contract | Address |
 |----------|---------|
-| **X402C Hub** | [`0x46048903457eA7976Aab09Ab379b52753531F08C`](https://basescan.org/address/0x46048903457eA7976Aab09Ab379b52753531F08C) |
-| **USDC** | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/address/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) |
+| X402C Hub | [`0x46048903457eA7976Aab09Ab379b52753531F08C`](https://basescan.org/address/0x46048903457eA7976Aab09Ab379b52753531F08C) |
+| USDC | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/address/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) |
 | X402C Token | [`0x001373f663c235a2112A14e03799813EAa7bC6F1`](https://basescan.org/address/0x001373f663c235a2112A14e03799813EAa7bC6F1) |
 | Demo Consumer | [`0xC707AB8905865f1E97f5CaBf3d2ae798dcb7827a`](https://basescan.org/address/0xC707AB8905865f1E97f5CaBf3d2ae798dcb7827a) |
 
@@ -302,27 +273,26 @@ Browse all endpoints at [x402c.org/hub](https://x402c.org/hub).
 
 ```
 contracts/
-  X402CConsumerBase.sol       # Inherit this — handles hub callback routing
-  X402CDemoConsumer.sol        # Full working example (single-TX pattern)
+  X402CConsumerBase.sol       # Inherit this, handles hub callback routing
+  X402CDemoConsumer.sol        # Working example (single-TX pattern)
   interfaces/
     IX402CConsumer.sol         # Callback interface your contract implements
 ```
 
-- **`X402CConsumerBase`** — Abstract base contract. Inherit it, implement `_onFulfilled()`, done.
-- **`X402CDemoConsumer`** — Production example with USDC handling, response storage, and recovery functions. Copy and modify for your use case.
+`X402CConsumerBase` is the abstract base. Inherit it and implement `_onFulfilled()`.
 
-## Building an Agent
+`X402CDemoConsumer` is a production example with USDC handling, response storage, and recovery functions.
+
+## Building an agent
 
 Agents fulfill requests by watching hub events and submitting API responses.
 
-1. **Stake** X402C tokens via the [Staking contract](https://basescan.org/address/0xd57905dc8eE86343Fd54Ba4Bb8cF68785F6326CB)
-2. **Register** an endpoint on the Hub — set your API URL, base cost, and gas config
-3. **Watch** for `RequestCreated` events matching your endpoint ID
-4. **Fetch** the API data using the request parameters
-5. **Submit** via `hub.fulfillRequest(requestId, responseData)`
-6. **Get paid** in USDC automatically on fulfillment
-
-Agent docs and backend reference coming soon.
+1. Stake X402C tokens via the [Staking contract](https://basescan.org/address/0xd57905dc8eE86343Fd54Ba4Bb8cF68785F6326CB)
+2. Register an endpoint on the hub with your API URL, base cost, and gas config
+3. Watch for `RequestCreated` events matching your endpoint ID
+4. Fetch the API data using the request parameters
+5. Submit via `hub.fulfillRequest(requestId, responseData)`
+6. Get paid in USDC automatically on fulfillment
 
 ## License
 
