@@ -148,3 +148,4 @@ typechain-types/
 appstate.json
 tmp_offers.json
 NUL
+.last-block-*

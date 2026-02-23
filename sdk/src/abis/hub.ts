@@ -1,6 +1,6 @@
 /**
  * X402CHubContract ABI (oracle-based gas pricing)
- * Contract: 0x54CE92b7170Df6761114113fB82d0E09941721Ab
+ * Contract: 0x7C6Fb07837776136dF87Df762fD03dA4b36ba2E2
  */
 export const HUB_ABI = [
   // ── Events ──
@@ -247,6 +247,27 @@ export const HUB_ABI = [
     name: 'cancelRequest',
     stateMutability: 'nonpayable',
     inputs: [{ name: 'requestId', type: 'bytes32' }],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'withdrawUSDC',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'amount', type: 'uint256' }],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'deactivateEndpoint',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'id', type: 'bytes32' }],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'reactivateEndpoint',
+    stateMutability: 'nonpayable',
+    inputs: [{ name: 'id', type: 'bytes32' }],
     outputs: [],
   },
   {

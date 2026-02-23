@@ -403,6 +403,48 @@ export function createHubClient(config: ClientConfig) {
     );
   }
 
+  async function withdrawUSDC(amount: bigint): Promise<Hex> {
+    const wc = requireWallet();
+    return withTxMutex(() =>
+      wc.writeContract({
+        address: hubAddress,
+        abi: HUB_ABI,
+        functionName: 'withdrawUSDC',
+        args: [amount],
+        account: wc.account!,
+        chain: wc.chain,
+      }),
+    );
+  }
+
+  async function deactivateEndpoint(endpointId: Hex): Promise<Hex> {
+    const wc = requireWallet();
+    return withTxMutex(() =>
+      wc.writeContract({
+        address: hubAddress,
+        abi: HUB_ABI,
+        functionName: 'deactivateEndpoint',
+        args: [endpointId],
+        account: wc.account!,
+        chain: wc.chain,
+      }),
+    );
+  }
+
+  async function reactivateEndpoint(endpointId: Hex): Promise<Hex> {
+    const wc = requireWallet();
+    return withTxMutex(() =>
+      wc.writeContract({
+        address: hubAddress,
+        abi: HUB_ABI,
+        functionName: 'reactivateEndpoint',
+        args: [endpointId],
+        account: wc.account!,
+        chain: wc.chain,
+      }),
+    );
+  }
+
   async function flushProtocolFeesToBuyback(): Promise<Hex> {
     const wc = requireWallet();
     return withTxMutex(() =>
@@ -439,6 +481,9 @@ export function createHubClient(config: ClientConfig) {
     createRequestWithCallback,
     fulfillRequest,
     cancelRequest,
+    withdrawUSDC,
+    deactivateEndpoint,
+    reactivateEndpoint,
     flushProtocolFeesToBuyback,
     checkProfitability,
   };
