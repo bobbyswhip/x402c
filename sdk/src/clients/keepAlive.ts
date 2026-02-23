@@ -30,9 +30,18 @@ export function createKeepAliveClient(config: ClientConfig) {
   // In-flight tracking to prevent double-submission
   const inFlight = new Set<string>();
 
+  // Cached subscription IDs — refresh every 60s or when explicitly invalidated
+  let cachedSubIds: Hex[] = [];
+  let subIdsCacheTime = 0;
+  const SUB_IDS_CACHE_TTL_MS = 60_000;
+
   function requireWallet() {
     if (!walletClient) throw new Error('walletClient required for write operations');
     return walletClient;
+  }
+
+  function invalidateSubIdCache() {
+    subIdsCacheTime = 0;
   }
 
   // ── Read Functions ──────────────────────────────────────────────────────
@@ -46,17 +55,35 @@ export function createKeepAliveClient(config: ClientConfig) {
   }
 
   async function getSubscriptionIds(): Promise<Hex[]> {
+    // Return cached IDs if still fresh
+    if (cachedSubIds.length > 0 && Date.now() - subIdsCacheTime < SUB_IDS_CACHE_TTL_MS) {
+      return cachedSubIds;
+    }
+
     const count = await getSubscriptionCount();
     const ids: Hex[] = [];
-    for (let i = 0n; i < count; i++) {
-      const id = await publicClient.readContract({
-        address: keepAliveAddress,
-        abi: KEEPALIVE_ABI,
-        functionName: 'subscriptionIds',
-        args: [i],
-      }) as Hex;
-      ids.push(id);
+    // Batch fetch in groups of 5 to reduce RPC pressure
+    const BATCH = 5;
+    for (let i = 0n; i < count; i += BigInt(BATCH)) {
+      const batchPromises: Promise<Hex>[] = [];
+      for (let j = i; j < count && j < i + BigInt(BATCH); j++) {
+        batchPromises.push(
+          publicClient.readContract({
+            address: keepAliveAddress,
+            abi: KEEPALIVE_ABI,
+            functionName: 'subscriptionIds',
+            args: [j],
+          }) as Promise<Hex>,
+        );
+      }
+      const batchResults = await Promise.allSettled(batchPromises);
+      for (const r of batchResults) {
+        if (r.status === 'fulfilled') ids.push(r.value);
+      }
     }
+
+    cachedSubIds = ids;
+    subIdsCacheTime = Date.now();
     return ids;
   }
 
@@ -139,17 +166,26 @@ export function createKeepAliveClient(config: ClientConfig) {
 
   async function getReadySubscriptions(): Promise<Hex[]> {
     const ids = await getSubscriptionIds();
-    const checks = await Promise.allSettled(
-      ids.map(async (id) => {
-        const ready = await isReady(id);
-        return { id, ready };
-      }),
-    );
-    return checks
-      .filter((r): r is PromiseFulfilledResult<{ id: Hex; ready: boolean }> =>
-        r.status === 'fulfilled' && r.value.ready,
-      )
-      .map((r) => r.value.id);
+    const ready: Hex[] = [];
+
+    // Batch isReady checks in groups of 5 to limit concurrent RPC calls
+    const BATCH = 5;
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const batch = ids.slice(i, i + BATCH);
+      const results = await Promise.allSettled(
+        batch.map(async (id) => {
+          const r = await isReady(id);
+          return { id, ready: r };
+        }),
+      );
+      for (const r of results) {
+        if (r.status === 'fulfilled' && r.value.ready) {
+          ready.push(r.value.id);
+        }
+      }
+    }
+
+    return ready;
   }
 
   // ── Event Watching ──────────────────────────────────────────────────────
@@ -331,9 +367,11 @@ export function createKeepAliveClient(config: ClientConfig) {
     intervalMs?: number;
     onFulfilled?: (subId: Hex, txHash: Hex) => void;
     onSkipped?: (subId: Hex, reason: string) => void;
+    onError?: (error: unknown) => void;
   }): UnwatchFn {
     const intervalMs = opts?.intervalMs ?? 10000;
     let stopped = false;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
     const poll = async () => {
       if (stopped) return;
@@ -341,24 +379,33 @@ export function createKeepAliveClient(config: ClientConfig) {
         const readySubs = await getReadySubscriptions();
         for (const subId of readySubs) {
           if (stopped) break;
-          const txHash = await fulfill(subId);
-          if (txHash) {
-            opts?.onFulfilled?.(subId, txHash);
-          } else {
-            opts?.onSkipped?.(subId, 'unprofitable or in-flight');
+          try {
+            const txHash = await fulfill(subId);
+            if (txHash) {
+              opts?.onFulfilled?.(subId, txHash);
+              // Invalidate cache after fulfillment so next poll sees updated state
+              invalidateSubIdCache();
+            } else {
+              opts?.onSkipped?.(subId, 'unprofitable or in-flight');
+            }
+          } catch (fulfillErr) {
+            opts?.onError?.(fulfillErr);
           }
         }
-      } catch {
-        // Polling error — will retry next cycle
+      } catch (pollErr) {
+        opts?.onError?.(pollErr);
+      }
+      // Schedule next poll AFTER current one completes (no overlap)
+      if (!stopped) {
+        timeoutId = setTimeout(poll, intervalMs);
       }
     };
 
-    const intervalId = setInterval(poll, intervalMs);
     poll(); // Run immediately
 
     return () => {
       stopped = true;
-      clearInterval(intervalId);
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
     };
   }
 

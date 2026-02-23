@@ -311,6 +311,9 @@ export function startAgentRunner(): void {
       onSkipped: (subId, reason) => {
         console.log(`[KeepAlive] Skipped ${subId.slice(0, 10)}...: ${reason}`);
       },
+      onError: (err) => {
+        console.error(`[KeepAlive] Poll error:`, (err as Error).message || err);
+      },
     });
 
     // Event watcher — detects new/cancelled subscriptions in real-time
