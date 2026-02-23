@@ -74,7 +74,7 @@ contract MyConsumer is X402CConsumerBase {
 ### 3. Deploy
 
 Deploy your consumer with:
-- `_hub`: `0x54CE92b7170Df6761114113fB82d0E09941721Ab` (X402C Hub on Base)
+- `_hub`: `0x7C6Fb07837776136dF87Df762fD03dA4b36ba2E2` (X402C Hub on Base)
 - `_usdc`: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` (USDC on Base)
 
 ### 4. Use it
@@ -234,7 +234,7 @@ Set `callbackGasLimit` conservatively (2M gas covers most cases). Match `maxResp
 
 All source code is public on Basescan:
 
-- [X402C Hub](https://basescan.org/address/0x54CE92b7170Df6761114113fB82d0E09941721Ab#code) - request/fulfill/callback
+- [X402C Hub](https://basescan.org/address/0x7C6Fb07837776136dF87Df762fD03dA4b36ba2E2#code) - request/fulfill/callback
 - [X402C Staking](https://basescan.org/address/0xd57905dc8eE86343Fd54Ba4Bb8cF68785F6326CB#code) - stake, slash, rewards
 - [X402C Dispute Resolver](https://basescan.org/address/0x27798a59635fb3E3F9e3373BDCAC8a78a43496bE#code) - consumer challenges
 - [X402C Price Oracle](https://basescan.org/address/0xdc5c2E4316f516982c9caAC4d28827245e89bf53#code) - ETH/USDC gas pricing
@@ -265,10 +265,10 @@ Browse all endpoints at [x402c.org/hub](https://x402c.org/hub).
 
 | Contract | Address |
 |----------|---------|
-| X402C Hub | [`0x54CE92b7170Df6761114113fB82d0E09941721Ab`](https://basescan.org/address/0x54CE92b7170Df6761114113fB82d0E09941721Ab) |
+| X402C Hub | [`0x7C6Fb07837776136dF87Df762fD03dA4b36ba2E2`](https://basescan.org/address/0x7C6Fb07837776136dF87Df762fD03dA4b36ba2E2) |
 | USDC | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/address/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) |
 | X402C Token | [`0x001373f663c235a2112A14e03799813EAa7bC6F1`](https://basescan.org/address/0x001373f663c235a2112A14e03799813EAa7bC6F1) |
-| Demo Consumer | [`0x9Cd7F73567F4eC2eBB4DAaA5fBCBb9C5C0eEe6fC`](https://basescan.org/address/0x9Cd7F73567F4eC2eBB4DAaA5fBCBb9C5C0eEe6fC) |
+| Demo Consumer | [`0xCD87C4b1A06445499190afe1C3945E747c078C11`](https://basescan.org/address/0xCD87C4b1A06445499190afe1C3945E747c078C11) |
 | KeepAlive | [`0x8b5f10E15f564A7BceaA402068edD94711d68cBF`](https://basescan.org/address/0x8b5f10E15f564A7BceaA402068edD94711d68cBF) |
 
 ## Files
