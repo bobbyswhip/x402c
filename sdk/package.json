@@ -1,0 +1,38 @@
+{
+  "name": "x402c",
+  "version": "0.2.0",
+  "description": "TypeScript SDK for the x402c protocol on Base Mainnet",
+  "type": "module",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./abis": {
+      "types": "./dist/abis/index.d.ts",
+      "import": "./dist/abis/index.js",
+      "require": "./dist/abis/index.cjs"
+    }
+  },
+  "peerDependencies": {
+    "viem": ">=2.21.0 <3.0.0"
+  },
+  "devDependencies": {
+    "viem": "2.46.2",
+    "typescript": "5.9.3",
+    "tsup": "8.5.1"
+  },
+  "scripts": {
+    "build": "tsup",
+    "type-check": "tsc --noEmit"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "license": "MIT"
+}

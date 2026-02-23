@@ -74,7 +74,7 @@ contract MyConsumer is X402CConsumerBase {
 ### 3. Deploy
 
 Deploy your consumer with:
-- `_hub`: `0x46048903457eA7976Aab09Ab379b52753531F08C` (X402C Hub on Base)
+- `_hub`: `0x54CE92b7170Df6761114113fB82d0E09941721Ab` (X402C Hub on Base)
 - `_usdc`: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` (USDC on Base)
 
 ### 4. Use it
@@ -234,7 +234,7 @@ Set `callbackGasLimit` conservatively (2M gas covers most cases). Match `maxResp
 
 All source code is public on Basescan:
 
-- [X402C Hub](https://basescan.org/address/0x46048903457eA7976Aab09Ab379b52753531F08C#code) - request/fulfill/callback
+- [X402C Hub](https://basescan.org/address/0x54CE92b7170Df6761114113fB82d0E09941721Ab#code) - request/fulfill/callback
 - [X402C Staking](https://basescan.org/address/0xd57905dc8eE86343Fd54Ba4Bb8cF68785F6326CB#code) - stake, slash, rewards
 - [X402C Dispute Resolver](https://basescan.org/address/0x27798a59635fb3E3F9e3373BDCAC8a78a43496bE#code) - consumer challenges
 - [X402C Price Oracle](https://basescan.org/address/0xdc5c2E4316f516982c9caAC4d28827245e89bf53#code) - ETH/USDC gas pricing
@@ -265,10 +265,10 @@ Browse all endpoints at [x402c.org/hub](https://x402c.org/hub).
 
 | Contract | Address |
 |----------|---------|
-| X402C Hub | [`0x46048903457eA7976Aab09Ab379b52753531F08C`](https://basescan.org/address/0x46048903457eA7976Aab09Ab379b52753531F08C) |
+| X402C Hub | [`0x54CE92b7170Df6761114113fB82d0E09941721Ab`](https://basescan.org/address/0x54CE92b7170Df6761114113fB82d0E09941721Ab) |
 | USDC | [`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`](https://basescan.org/address/0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913) |
 | X402C Token | [`0x001373f663c235a2112A14e03799813EAa7bC6F1`](https://basescan.org/address/0x001373f663c235a2112A14e03799813EAa7bC6F1) |
-| Demo Consumer | [`0xC707AB8905865f1E97f5CaBf3d2ae798dcb7827a`](https://basescan.org/address/0xC707AB8905865f1E97f5CaBf3d2ae798dcb7827a) |
+| Demo Consumer | [`0x9Cd7F73567F4eC2eBB4DAaA5fBCBb9C5C0eEe6fC`](https://basescan.org/address/0x9Cd7F73567F4eC2eBB4DAaA5fBCBb9C5C0eEe6fC) |
 | KeepAlive | [`0x8b5f10E15f564A7BceaA402068edD94711d68cBF`](https://basescan.org/address/0x8b5f10E15f564A7BceaA402068edD94711d68cBF) |
 
 ## Files
@@ -417,6 +417,29 @@ Gas reimbursement uses the same oracle as the Hub — `estimatedGasCostWei` is c
 `isReady(subscriptionId)` checks everything in one view call: active, interval, balance, max fulfillments, and `shouldRun()`. Agents poll this to find work.
 
 Cancel anytime with `cancelSubscription()` — remaining deposit refunded immediately.
+
+## TypeScript SDK
+
+```bash
+npm install x402c viem
+```
+
+```ts
+import { createHubClient, createKeepAliveClient } from 'x402c';
+import { createPublicClient, http } from 'viem';
+import { base } from 'viem/chains';
+
+const publicClient = createPublicClient({ chain: base, transport: http() });
+
+const hub = createHubClient({ publicClient });
+const endpoints = await hub.getEndpoints();
+const ethPrice = await hub.getEthPrice();
+
+const keepAlive = createKeepAliveClient({ publicClient });
+const stats = await keepAlive.getStats();
+```
+
+See [sdk/README.md](sdk/README.md) for full API reference.
 
 ## Building an agent
 

@@ -142,3 +142,9 @@ vite.config.ts.timestamp-*
 cache/
 artifacts/
 typechain-types/
+
+# Project-specific
+*.pem
+appstate.json
+tmp_offers.json
+NUL

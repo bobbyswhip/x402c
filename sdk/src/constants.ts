@@ -1,0 +1,29 @@
+/**
+ * x402c Protocol Constants — Base Mainnet
+ */
+
+export const ADDRESSES = {
+  HUB: '0x54CE92b7170Df6761114113fB82d0E09941721Ab',
+  KEEPALIVE: '0x8b5f10E15f564A7BceaA402068edD94711d68cBF',
+  STAKING: '0xd57905dc8eE86343Fd54Ba4Bb8cF68785F6326CB',
+  PRICE_ORACLE: '0xdc5c2E4316f516982c9caAC4d28827245e89bf53',
+  TOKEN: '0x001373f663c235a2112A14e03799813EAa7bC6F1',
+  USDC: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',
+  WASSOTC_ROUTER: '0xD39bcE42ad5Cf7704e74206aD9551206fa0aD98a',
+  WASS: '0x445040FfaAb67992Ba1020ec2558CD6754d83Ad6',
+  SUPERSTRAT_HOOK: '0x35B9b5b023897DA8C7375ba6141245B8416460CC',
+} as const;
+
+export const CHAIN_ID = 8453;
+
+/** V4 pool key for X402C/wASS (SuperStrat hook) */
+export const X402C_POOL_KEY = {
+  currency0: ADDRESSES.TOKEN,
+  currency1: ADDRESSES.WASS,
+  fee: 3000,
+  tickSpacing: 60,
+  hooks: ADDRESSES.SUPERSTRAT_HOOK,
+} as const;
+
+/** wASS is currency1, not currency0 in the pool key */
+export const WASS_IS_TOKEN0 = false;
